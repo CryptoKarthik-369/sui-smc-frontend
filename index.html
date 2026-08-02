@@ -86,8 +86,7 @@
   .sig-chip{font-size:9.5px; padding:3px 7px; border-radius:5px; background:#0f2119; color:var(--mint); border:1px solid var(--mint-dim);}
 
   /* ---------- Analysis ---------- */
-  .an-layout{grid-template-columns:2.1fr 1fr; align-items:start;}
-  .tv-chart{height:420px; border-radius:12px; background:linear-gradient(160deg,#0d1815,#0a1210); border:1px solid var(--border); display:flex; align-items:center; justify-content:center; flex-direction:column; gap:10px; color:var(--text-faint); font-family:var(--font-mono); font-size:12px;}
+  .an-layout{grid-template-columns:2.1fr 1fr; align-items:stretch;}
   .tf-strip{display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-top:16px; align-items:stretch;}
   .tf-card{position:relative; border:1px solid var(--border); border-radius:12px; padding:14px 14px 12px; background:linear-gradient(165deg,#0d1815,#0a1210); overflow:hidden; transition:.18s; display:flex; flex-direction:column;}
   .tf-card::before{content:""; position:absolute; top:0; left:0; right:0; height:2px; background:var(--accent,var(--mint-dim));}
@@ -227,18 +226,6 @@ const recentSignals = [
   { time:"13:05", tf:"1H", tags:["BOS"], conf:3 },
   { time:"11:47", tf:"5M", tags:["Sweep","OB"], conf:5 },
   { time:"09:12", tf:"1D", tags:["CHoCH"], conf:3 },
-];
-const fallbackCoins = [
-  { symbol:"SUIUSDT", name:"Sui" },
-  { symbol:"BTCUSDT", name:"Bitcoin" },
-  { symbol:"ETHUSDT", name:"Ethereum" },
-  { symbol:"SOLUSDT", name:"Solana" },
-  { symbol:"BNBUSDT", name:"BNB" },
-  { symbol:"XRPUSDT", name:"XRP" },
-  { symbol:"DOGEUSDT", name:"Dogecoin" },
-  { symbol:"ARBUSDT", name:"Arbitrum" },
-  { symbol:"OPUSDT", name:"Optimism" },
-  { symbol:"AVAXUSDT", name:"Avalanche" },
 ];
 const tfBreakdown = {
   "1D": {
@@ -462,16 +449,32 @@ function Dashboard({ settings }) {
 
 // ---------------- Analysis ----------------
 function Analysis({ settings }) {
-  const [activeCoin, setActiveCoin] = useState(settings.coins[0] || "SUIUSDT");
-  useEffect(()=>{ if (!settings.coins.includes(activeCoin)) setActiveCoin(settings.coins[0]); }, [settings.coins]);
+  const [scan, setScan] = useState(null);
+  const [symbols, setSymbols] = useState(settings.coins && settings.coins.length ? settings.coins : ["SUIUSDT"]);
+  const [activeCoin, setActiveCoin] = useState(symbols[0]);
 
-  const confluenceScore = 4; // out of 5 — matches SMC detections below
-  const aiScore = 82; // out of 100 — model confidence blending confluence, structure, R:R
+  useEffect(() => {
+    const base = (settings.serverUrl || "").trim().replace(/\/+$/, "");
+    if (!base || !settings.connected) return;
+    fetch(base + "/status").then(r=>r.json()).then(d => {
+      if (d.watchSymbols?.length) { setSymbols(d.watchSymbols); setActiveCoin(a => d.watchSymbols.includes(a) ? a : d.watchSymbols[0]); }
+    }).catch(()=>{});
+    fetch(base + "/scan").then(r=>r.json()).then(d => setScan(d.results || null)).catch(()=>{});
+  }, [settings.connected, settings.serverUrl]);
+
+  const liveResult = scan ? scan.find(r => r.symbol === activeCoin) : null;
+  const usingLive = settings.connected && !!liveResult?.analysis?.ready;
+
+  const confluenceScore = usingLive ? liveResult.analysis.confluenceScore : 4;
+  const aiScore = usingLive ? Math.round(confluenceScore / 5 * 100) : 82;
   const minConfluence = parseInt(settings.minConfluence, 10) || 3;
+  const side = usingLive ? liveResult.analysis.side : "BUY";
 
   let verdict;
   if (settings.aiVeto && confluenceScore < minConfluence) {
     verdict = { type:"blocked", text:`Blocked by AI veto — confluence ${confluenceScore}/5 below your ${minConfluence}/5 minimum` };
+  } else if (!side) {
+    verdict = { type:"wait", text:"No aligned setup right now — scanner is watching for one" };
   } else if (settings.autoTrade) {
     verdict = settings.liveTrading
       ? { type:"go", text:"AI confirmed — auto-executing LIVE order on Binance Futures" }
@@ -480,23 +483,51 @@ function Analysis({ settings }) {
     verdict = { type:"wait", text:"AI confirmed — awaiting your manual approval (auto-trade off)" };
   }
 
+  const displayTf = usingLive ? {
+    "1D": { role: "Direction", bias: liveResult.analysis.d1.direction==="bullish"?"bull":"bear",
+      label: liveResult.analysis.d1.direction==="bullish" ? "Bullish · Discount" : "Bearish · Premium",
+      fields: [
+        { k:"Price", v:liveResult.analysis.d1.price?.toFixed(4), c:"azure" },
+        { k:"Direction", v:liveResult.analysis.d1.direction, c: liveResult.analysis.d1.direction==="bullish"?"mint":"coral" },
+        { k:"Swing Range", v:`${liveResult.analysis.d1.lastSwingLow?.toFixed(4)} – ${liveResult.analysis.d1.lastSwingHigh?.toFixed(4)}` },
+        { k:"EQ Level", v:liveResult.analysis.d1.eqLevel?.toFixed(4) },
+      ]},
+    "1H": { role: "Key Levels & Structure", bias: liveResult.analysis.h1.bullishCHoCH?"bull":liveResult.analysis.h1.bearishCHoCH?"bear":"bull",
+      label: liveResult.analysis.h1.bullishCHoCH ? "CHoCH confirmed (bull)" : liveResult.analysis.h1.bearishCHoCH ? "CHoCH confirmed (bear)" : "No CHoCH yet",
+      fields: [
+        { k:"Swing High", v:liveResult.analysis.h1.lastSwingHigh?.toFixed(4) },
+        { k:"Swing Low", v:liveResult.analysis.h1.lastSwingLow?.toFixed(4) },
+        { k:"FVG", v: liveResult.analysis.h1.bullFVG ? `${liveResult.analysis.h1.bullFVG.bottom.toFixed(4)}–${liveResult.analysis.h1.bullFVG.top.toFixed(4)}` : (liveResult.analysis.h1.bearFVG ? `${liveResult.analysis.h1.bearFVG.bottom.toFixed(4)}–${liveResult.analysis.h1.bearFVG.top.toFixed(4)}` : "none"), c:"amber" },
+      ]},
+    "5M": { role: "Entry Trigger", bias: side==="BUY"?"bull":"bear",
+      label: liveResult.analysis.signals.join(" + ") || "watching",
+      fields: [
+        { k:"Price", v:liveResult.analysis.price?.toFixed(4), c:"azure" },
+        { k:"Sweep", v: (side==="BUY"?liveResult.analysis.m5.bullSweep:liveResult.analysis.m5.bearSweep) ? "confirmed" : "none", c:"coral" },
+        { k:"Signals", v: liveResult.analysis.signals.join(", ") || "none" },
+      ]},
+  } : tfBreakdown;
+
   return (
     <div className="grid an-layout">
       <div>
         <div className="card">
-          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:"4px"}}>
-            <h3 style={{marginBottom:0}}>{activeCoin.replace("USDT","/USDT")} · Live Chart</h3>
-            <select value={activeCoin} onChange={e=>setActiveCoin(e.target.value)} style={{background:"#0b1512",border:"1px solid var(--border)",borderRadius:"8px",padding:"6px 10px",color:"var(--text)",fontFamily:"var(--font-mono)",fontSize:"11.5px"}}>
-              {settings.coins.map(c=><option key={c} value={c}>{c}</option>)}
-            </select>
-          </div>
-          <div className="tv-chart">
-            <span>TradingView widget mounts here</span>
-            <span style={{color:"var(--text-faint)",fontSize:"10.5px"}}>connects in Phase 3 — Live Market Data</span>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:"14px"}}>
+            <h3 style={{marginBottom:0}}>{activeCoin.replace("USDT","/USDT")} · SMC Read</h3>
+            <div style={{display:"flex",alignItems:"center",gap:"8px"}}>
+              <span className={"conn-status "+(usingLive?"ok":"off")} style={{fontSize:"9.5px",padding:"3px 8px"}}>
+                <span className="d"></span>{usingLive ? "LIVE" : "DEMO"}
+              </span>
+              {symbols.length > 1 && (
+                <select value={activeCoin} onChange={e=>setActiveCoin(e.target.value)} style={{background:"#0b1512",border:"1px solid var(--border)",borderRadius:"8px",padding:"6px 10px",color:"var(--text)",fontFamily:"var(--font-mono)",fontSize:"11.5px"}}>
+                  {symbols.map(c=><option key={c} value={c}>{c}</option>)}
+                </select>
+              )}
+            </div>
           </div>
           <div className="tf-strip">
             {["1D","1H","5M"].map(tf => {
-              const d = tfBreakdown[tf];
+              const d = displayTf[tf];
               const accentClass = tf==="1D" ? "tf-1d" : tf==="1H" ? "tf-1h" : "tf-5m";
               return (
                 <div className={"tf-card "+accentClass} key={tf}>
@@ -512,7 +543,7 @@ function Analysis({ settings }) {
                     {d.fields.map((f,i) => (
                       <div className="tf-detail" key={i}>
                         <span className="k">{f.k}</span>
-                        <span className={"v"+(f.c?" "+f.c:"")}>{f.v}</span>
+                        <span className={"v"+(f.c?" "+f.c:"")}>{f.v ?? "—"}</span>
                       </div>
                     ))}
                   </div>
@@ -542,11 +573,11 @@ function Analysis({ settings }) {
       <div className="card">
         <h3>AI Verdict</h3>
         <div className="verdict-box">
-          <div className="verdict-big">LONG</div>
-          <div className="conf-tag">confidence: high</div>
+          <div className="verdict-big" style={side==="SELL"?{color:"var(--coral)"}:{}}>{side || "—"}</div>
+          <div className="conf-tag">confidence: {confluenceScore>=4?"high":confluenceScore>=3?"medium":"low"}</div>
         </div>
         <div className="lvl-grid">
-          <div className="lvl entry"><label>Entry</label><div className="v">1.0230</div></div>
+          <div className="lvl entry"><label>Entry</label><div className="v">{usingLive ? liveResult.analysis.price?.toFixed(4) : "1.0230"}</div></div>
           <div className="lvl sl"><label>Stop Loss</label><div className="v">1.0140</div></div>
           <div className="lvl tp"><label>Take Profit</label><div className="v">1.0410</div></div>
         </div>
@@ -676,47 +707,7 @@ function Settings({ settings, setSettings, showToast }) {
   const [showSecret, setShowSecret] = useState(false);
   const [testing, setTesting] = useState(false);
   const [connStatus, setConnStatus] = useState(settings.connected ? "ok" : "off");
-  const [coinList, setCoinList] = useState(fallbackCoins);
-  const [coinsLoading, setCoinsLoading] = useState(true);
-  const [coinSource, setCoinSource] = useState("fallback list");
-  const [coinSearch, setCoinSearch] = useState("");
-
-  const loadCoins = () => {
-    setCoinsLoading(true);
-    fetch("https://fapi.binance.com/fapi/v1/exchangeInfo")
-      .then(r => r.json())
-      .then(data => {
-        const pairs = (data.symbols || [])
-          .filter(s => s.contractType === "PERPETUAL" && s.status === "TRADING" && s.quoteAsset === "USDT")
-          .map(s => ({ symbol: s.symbol, name: s.baseAsset }))
-          .sort((a,b) => a.symbol.localeCompare(b.symbol));
-        if (pairs.length > 0) {
-          setCoinList(pairs);
-          setCoinSource("Binance Futures (live)");
-        } else {
-          setCoinList(fallbackCoins);
-          setCoinSource("fallback list");
-        }
-      })
-      .catch(() => {
-        setCoinList(fallbackCoins);
-        setCoinSource("fallback list — Binance unreachable");
-      })
-      .finally(() => setCoinsLoading(false));
-  };
-
-  useEffect(() => { loadCoins(); }, []);
-
-  const filteredCoins = coinList.filter(c =>
-    c.symbol.toLowerCase().includes(coinSearch.toLowerCase())
-  );
-
-  const toggleCoin = (sym) => {
-    const has = settings.coins.includes(sym);
-    const next = has ? settings.coins.filter(c=>c!==sym) : [...settings.coins, sym];
-    if (next.length === 0) return; // keep at least one
-    setSettings({ ...settings, coins: next });
-  };
+  const [watchedSymbols, setWatchedSymbols] = useState(settings.coins || []);
 
   const [serverUrl, setServerUrl] = useState(settings.serverUrl);
   const [serverInfo, setServerInfo] = useState(null);
@@ -741,7 +732,15 @@ function Settings({ settings, setSettings, showToast }) {
         setServerInfo(data);
         setConnStatus("ok");
         setTesting(false);
-        showToast(`Connected — backend is in ${data.mode?.toUpperCase() || "?"} mode`);
+        if (data.watchSymbols?.length) setWatchedSymbols(data.watchSymbols);
+        // Sync toggles from backend truth ONLY here (an explicit user action),
+        // never silently on page navigation — that was overwriting your choice.
+        setSettings({
+          ...settings, connected: true, serverUrl: base,
+          autoTrade: data.autoTrade, liveTrading: data.tradeEnabled,
+          minConfluence: String(data.minConfluence), coins: data.watchSymbols || settings.coins,
+        });
+        showToast(`Connected — backend is in ${data.mode?.toUpperCase() || "?"} mode, Auto-Trade ${data.autoTrade ? "ON" : "OFF"}`);
       })
       .catch(err => {
         setConnStatus("off");
@@ -758,7 +757,8 @@ function Settings({ settings, setSettings, showToast }) {
   };
 
   // Push a toggle change straight to the backend so it actually takes effect
-  // (not just local UI state). Reverts + shows an error if the call fails.
+  // (not just local UI state). This is the ONLY place besides Test Connection
+  // that touches autoTrade/liveTrading — nothing silently overwrites them.
   const pushConfig = (patch) => {
     const base = (settings.serverUrl || "").trim().replace(/\/+$/, "");
     if (!base || !settings.connected) {
@@ -784,21 +784,6 @@ function Settings({ settings, setSettings, showToast }) {
         showToast("Failed to apply — " + (err.message || "could not reach server"));
       });
   };
-
-  // On connect, pull the backend's actual current config so the toggles
-  // reflect reality (in case it was changed elsewhere, or after a restart).
-  useEffect(() => {
-    const base = (settings.serverUrl || "").trim().replace(/\/+$/, "");
-    if (!base || !settings.connected) return;
-    fetch(base + "/config")
-      .then(r => r.json())
-      .then(data => {
-        const cfg = data.config;
-        if (!cfg) return;
-        setSettings({ ...settings, autoTrade: cfg.autoTrade, liveTrading: cfg.tradeEnabled, minConfluence: String(cfg.minConfluence) });
-      })
-      .catch(() => {});
-  }, [settings.connected]);
 
   return (
     <div className="grid settings-layout">
@@ -889,26 +874,25 @@ function Settings({ settings, setSettings, showToast }) {
 
       <div>
         <div className="card">
-          <h3>Coin Selection</h3>
-          <div className="field-hint">Symbols pulled live from Binance USDT-M Futures. Select the ones the bot should scan and can trade — at least one required.</div>
-          <div className="coin-search">
-            <input type="text" placeholder="Search symbol (e.g. SOL, BTC)…" value={coinSearch} onChange={e=>setCoinSearch(e.target.value)} />
+          <h3>Watched Coins</h3>
+          <div className="field-hint">
+            The bot scans and trades these symbols automatically as part of your strategy —
+            no manual picking needed. Configured on the backend via <code>WATCH_SYMBOLS</code>.
           </div>
-          <div className="coin-meta">
-            <span>{coinsLoading ? "Loading symbols from Binance…" : `${coinList.length} pairs · source: ${coinSource}`}</span>
-            <button className="refresh-btn" onClick={loadCoins} disabled={coinsLoading}>{coinsLoading ? "…" : "refresh"}</button>
-          </div>
-          <div className="coin-grid">
-            {filteredCoins.length === 0 && !coinsLoading && (
-              <div className="coin-empty">No symbols match "{coinSearch}"</div>
+          <div className="coin-grid" style={{maxHeight:"none"}}>
+            {watchedSymbols.length === 0 && (
+              <div className="coin-empty">{settings.connected ? "Connecting…" : "Connect to a backend above to see the live watch list"}</div>
             )}
-            {filteredCoins.map(c => (
-              <label key={c.symbol} className={"coin-chip"+(settings.coins.includes(c.symbol)?" on":"")}>
-                <input type="checkbox" checked={settings.coins.includes(c.symbol)} onChange={()=>toggleCoin(c.symbol)} />
-                {c.symbol}
-              </label>
+            {watchedSymbols.map(sym => (
+              <div key={sym} className="coin-chip on" style={{cursor:"default"}}>{sym}</div>
             ))}
           </div>
+          {settings.connected && (
+            <div className="field-hint" style={{marginTop:"10px"}}>
+              To change which coins are scanned, update <code>WATCH_SYMBOLS</code> in your
+              backend's environment variables and redeploy.
+            </div>
+          )}
         </div>
 
         <div className="card" style={{marginTop:"16px"}}>
